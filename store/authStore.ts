@@ -244,10 +244,23 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       const family = convertFamilyRow(familyData);
       console.log('Found family:', family);
       
-      // Get all family members
+      // Get all family members directly without using the store method to avoid recursion
       let familyMembers: FamilyMember[] = [];
       try {
-        familyMembers = await get().getFamilyMembers(family.id);
+        console.log('Fetching family members for family ID:', family.id);
+        
+        const { data: membersData, error: membersError } = await supabase
+          .from('family_members')
+          .select('*')
+          .eq('family_id', family.id)
+          .order('created_at', { ascending: true });
+        
+        if (membersError) {
+          console.error('Error fetching family members:', membersError);
+          throw new Error(`Failed to fetch family members: ${membersError.message}`);
+        }
+        
+        familyMembers = membersData ? membersData.map(convertFamilyMemberRow) : [];
         console.log('Found family members:', familyMembers.length);
       } catch (error) {
         console.error('Failed to fetch family members during login:', error);
@@ -292,10 +305,24 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         throw new Error('Family not found with that code');
       }
       
-      // Get family members
+      // Get family members directly without using the store method to avoid recursion
       let familyMembers: FamilyMember[] = [];
       try {
-        familyMembers = await get().getFamilyMembers(family.id);
+        console.log('Fetching family members for family ID:', family.id);
+        
+        const { data: membersData, error: membersError } = await supabase
+          .from('family_members')
+          .select('*')
+          .eq('family_id', family.id)
+          .order('created_at', { ascending: true });
+        
+        if (membersError) {
+          console.error('Error fetching family members:', membersError);
+          throw new Error(`Failed to fetch family members: ${membersError.message}`);
+        }
+        
+        familyMembers = membersData ? membersData.map(convertFamilyMemberRow) : [];
+        console.log('Found family members:', familyMembers.length);
       } catch (error) {
         console.error('Failed to fetch family members during child login:', error);
         throw new Error(`Failed to load family data: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -550,7 +577,20 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
             const family = convertFamilyRow(familyData);
             let familyMembers: FamilyMember[] = [];
             try {
-              familyMembers = await get().getFamilyMembers(family.id);
+              console.log('Fetching family members for family ID:', family.id);
+              
+              const { data: membersData, error: membersError } = await supabase
+                .from('family_members')
+                .select('*')
+                .eq('family_id', family.id)
+                .order('created_at', { ascending: true });
+              
+              if (membersError) {
+                console.error('Error fetching family members:', membersError);
+                familyMembers = [];
+              } else {
+                familyMembers = membersData ? membersData.map(convertFamilyMemberRow) : [];
+              }
             } catch (error) {
               console.error('Failed to fetch family members during session restore:', error);
               // Don't fail completely, just log the error
@@ -597,10 +637,27 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
           return;
         }
         
-        // Get fresh family members
+        // Get fresh family members directly without using the store method to avoid recursion
         let familyMembers: FamilyMember[] = [];
         try {
-          familyMembers = await get().getFamilyMembers(family.id);
+          console.log('Fetching family members for family ID:', family.id);
+          
+          const { data: membersData, error: membersError } = await supabase
+            .from('family_members')
+            .select('*')
+            .eq('family_id', family.id)
+            .order('created_at', { ascending: true });
+          
+          if (membersError) {
+            console.error('Error fetching family members:', membersError);
+            // Clear session if we can't load family data
+            await AsyncStorage.removeItem('user');
+            await AsyncStorage.removeItem('family');
+            set({ isLoading: false });
+            return;
+          }
+          
+          familyMembers = membersData ? membersData.map(convertFamilyMemberRow) : [];
         } catch (error) {
           console.error('Failed to fetch family members during session restore:', error);
           // Clear session if we can't load family data
