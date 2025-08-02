@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AuthState, Family, FamilyMember, User } from '@/types/auth';
-import { supabase, generateFamilyCode } from '@/lib/supabase';
+import { supabase, generateFamilyCode, queryFamilyMember } from '@/lib/supabase';
 import type { Database } from '@/lib/supabase';
 
 type FamilyRow = Database['public']['Tables']['families']['Row'];
@@ -207,12 +207,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       console.log('User authenticated with ID:', userId);
       
       // First, get the family member record for this user
-      const { data: memberData, error: memberError } = await supabase
-        .from('family_members')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('role', 'parent')
-        .single();
+      // Use helper function with retry logic to avoid RLS recursion
+      const { data: memberData, error: memberError } = await queryFamilyMember(userId);
       
       if (memberError) {
         console.error('Family member lookup error:', memberError);
@@ -556,12 +552,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         console.log('Found existing Supabase session for user:', session.user.id);
         
         // Parent session - validate with database
-        const { data: memberData, error: memberError } = await supabase
-          .from('family_members')
-          .select('*')
-          .eq('user_id', session.user.id)
-          .eq('role', 'parent')
-          .single();
+        // Use helper function with retry logic to avoid RLS recursion
+        const { data: memberData, error: memberError } = await queryFamilyMember(session.user.id);
         
         if (!memberError && memberData) {
           console.log('Found family member data:', memberData);

@@ -13,6 +13,42 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
 });
 
+// Helper function to safely query family members with retry logic
+export const queryFamilyMember = async (userId: string, retries = 3): Promise<{ data: any; error: any }> => {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      console.log(`Attempting to query family member (attempt ${attempt}/${retries})`);
+      
+      // Try a simple query first
+      const { data, error } = await supabase
+        .from('family_members')
+        .select('*')
+        .eq('user_id', userId)
+        .limit(1);
+      
+      if (error) {
+        console.error(`Query attempt ${attempt} failed:`, error.message);
+        if (attempt === retries) {
+          return { data: null, error };
+        }
+        // Wait before retry
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        continue;
+      }
+      
+      return { data: data?.[0] || null, error: null };
+    } catch (err) {
+      console.error(`Query attempt ${attempt} threw error:`, err);
+      if (attempt === retries) {
+        return { data: null, error: err };
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+  
+  return { data: null, error: new Error('All retry attempts failed') };
+};
+
 // Database types based on the schema
 export interface Database {
   public: {
