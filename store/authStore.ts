@@ -1,23 +1,30 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AuthState, Family, FamilyMember, User } from '@/types/auth';
+import { supabase, generateFamilyCode } from '@/lib/supabase';
+import type { Database } from '@/lib/supabase';
 
-// Mock functions for now - will be replaced with actual Supabase calls
-const mockGenerateFamilyCode = (): string => {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const numbers = '0123456789';
-  let code = '';
-  
-  for (let i = 0; i < 3; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  
-  for (let i = 0; i < 3; i++) {
-    code += numbers.charAt(Math.floor(Math.random() * numbers.length));
-  }
-  
-  return code;
-};
+type FamilyRow = Database['public']['Tables']['families']['Row'];
+type FamilyMemberRow = Database['public']['Tables']['family_members']['Row'];
+
+// Helper functions to convert database rows to app types
+const convertFamilyRow = (row: FamilyRow): Family => ({
+  id: row.id,
+  name: row.name,
+  code: row.family_code,
+  createdAt: row.created_at,
+  ownerId: row.created_by,
+});
+
+const convertFamilyMemberRow = (row: FamilyMemberRow): FamilyMember => ({
+  id: row.id,
+  familyId: row.family_id,
+  name: row.display_name,
+  age: row.age || undefined,
+  avatar: row.avatar_url || undefined,
+  role: row.role,
+  points: row.points,
+});
 
 interface AuthStore extends AuthState {
   // Auth actions
@@ -48,10 +55,69 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       set({ isLoading: true, error: null });
       
-      // TODO: Replace with actual Supabase auth
-      // Mock registration for now
-      const userId = `user_${Date.now()}`;
-      const family = await get().createFamily(familyName);
+      // Register user with Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email,
+        password,
+      });
+      
+      if (authError) throw authError;
+      if (!authData.user) throw new Error('Failed to create user');
+      
+      const userId = authData.user.id;
+      
+      // Create family with generated code
+      let familyCode = generateFamilyCode();
+      let attempts = 0;
+      let family: Family;
+      
+      // Ensure unique family code
+      while (attempts < 10) {
+        const { data: existingFamily } = await supabase
+          .from('families')
+          .select('id')
+          .eq('family_code', familyCode)
+          .single();
+        
+        if (!existingFamily) break;
+        familyCode = generateFamilyCode();
+        attempts++;
+      }
+      
+      // Insert family
+      const { data: familyData, error: familyError } = await supabase
+        .from('families')
+        .insert({
+          name: familyName,
+          family_code: familyCode,
+          created_by: userId,
+        })
+        .select()
+        .single();
+      
+      if (familyError) throw familyError;
+      if (!familyData) throw new Error('Failed to create family');
+      
+      family = convertFamilyRow(familyData);
+      
+      // Add parent as family member
+      const { data: memberData, error: memberError } = await supabase
+        .from('family_members')
+        .insert({
+          family_id: family.id,
+          user_id: userId,
+          role: 'parent',
+          display_name: 'Parent',
+          points: 0,
+          level: 1,
+        })
+        .select()
+        .single();
+      
+      if (memberError) throw memberError;
+      if (!memberData) throw new Error('Failed to create family member');
+      
+      const parentMember = convertFamilyMemberRow(memberData);
       
       const user: User = {
         id: userId,
@@ -59,9 +125,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         role: 'parent',
         familyId: family.id,
       };
-      
-      // Add the parent as a family member
-      const parentMember = await get().addFamilyMember('Parent', undefined, undefined);
       
       // Save to AsyncStorage
       await AsyncStorage.setItem('user', JSON.stringify(user));
@@ -74,6 +137,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isLoading: false 
       });
     } catch (error) {
+      console.error('Registration error:', error);
       set({ 
         error: error instanceof Error ? error.message : 'Failed to register', 
         isLoading: false 
@@ -85,26 +149,43 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       set({ isLoading: true, error: null });
       
-      // TODO: Replace with actual Supabase auth
-      // Mock login for now
-      const userId = `user_${Date.now()}`;
+      // Sign in with Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      
+      if (authError) throw authError;
+      if (!authData.user) throw new Error('Failed to authenticate');
+      
+      const userId = authData.user.id;
+      
+      // Get family member record to find family
+      const { data: memberData, error: memberError } = await supabase
+        .from('family_members')
+        .select(`
+          *,
+          families!inner(*)
+        `)
+        .eq('user_id', userId)
+        .eq('role', 'parent')
+        .single();
+      
+      if (memberError) throw new Error('No family found for this account');
+      if (!memberData) throw new Error('Family member not found');
+      
+      const familyData = (memberData as any).families;
+      const family = convertFamilyRow(familyData);
+      
+      // Get all family members
+      const familyMembers = await get().getFamilyMembers(family.id);
       
       const user: User = {
         id: userId,
         email,
         role: 'parent',
-        familyId: 'family_123',
+        familyId: family.id,
       };
-      
-      const family: Family = {
-        id: 'family_123',
-        name: 'Smith Family',
-        code: 'ABC123',
-        createdAt: new Date().toISOString(),
-        ownerId: userId,
-      };
-      
-      const familyMembers = await get().getFamilyMembers(family.id);
       
       // Save to AsyncStorage
       await AsyncStorage.setItem('user', JSON.stringify(user));
@@ -117,6 +198,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isLoading: false 
       });
     } catch (error) {
+      console.error('Login error:', error);
       set({ 
         error: error instanceof Error ? error.message : 'Failed to login', 
         isLoading: false 
@@ -153,7 +235,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         familyId: family.id,
       };
       
-      // Save to AsyncStorage
+      // Save to AsyncStorage (custom session for children)
       await AsyncStorage.setItem('user', JSON.stringify(user));
       await AsyncStorage.setItem('family', JSON.stringify(family));
       
@@ -164,6 +246,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isLoading: false 
       });
     } catch (error) {
+      console.error('Child login error:', error);
       set({ 
         error: error instanceof Error ? error.message : 'Failed to login', 
         isLoading: false 
@@ -174,6 +257,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   logout: async () => {
     try {
       set({ isLoading: true });
+      
+      // Sign out from Supabase if it's a parent (authenticated user)
+      const { user } = get();
+      if (user?.role === 'parent') {
+        await supabase.auth.signOut();
+      }
       
       // Clear AsyncStorage
       await AsyncStorage.removeItem('user');
@@ -187,6 +276,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         error: null
       });
     } catch (error) {
+      console.error('Logout error:', error);
       set({ 
         error: error instanceof Error ? error.message : 'Failed to logout', 
         isLoading: false 
@@ -195,29 +285,65 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   createFamily: async (name) => {
-    // TODO: Replace with actual Supabase call
-    const family: Family = {
-      id: `family_${Date.now()}`,
-      name,
-      code: mockGenerateFamilyCode(),
-      createdAt: new Date().toISOString(),
-      ownerId: get().user?.id || `user_${Date.now()}`,
-    };
+    const { user } = get();
+    if (!user) throw new Error('User not authenticated');
     
-    return family;
+    // Generate unique family code
+    let familyCode = generateFamilyCode();
+    let attempts = 0;
+    
+    while (attempts < 10) {
+      const { data: existingFamily } = await supabase
+        .from('families')
+        .select('id')
+        .eq('family_code', familyCode)
+        .single();
+      
+      if (!existingFamily) break;
+      familyCode = generateFamilyCode();
+      attempts++;
+    }
+    
+    // Insert family
+    const { data: familyData, error: familyError } = await supabase
+      .from('families')
+      .insert({
+        name,
+        family_code: familyCode,
+        created_by: user.id,
+      })
+      .select()
+      .single();
+    
+    if (familyError) throw familyError;
+    if (!familyData) throw new Error('Failed to create family');
+    
+    return convertFamilyRow(familyData);
   },
 
   addFamilyMember: async (name, age, avatar) => {
-    // TODO: Replace with actual Supabase call
-    const member: FamilyMember = {
-      id: `member_${Date.now()}`,
-      familyId: get().family?.id || '',
-      name,
-      age,
-      avatar,
-      role: 'child', // Default to child, parent is created differently
-      points: 0,
-    };
+    const { family } = get();
+    if (!family) throw new Error('No family found');
+    
+    // Insert family member
+    const { data: memberData, error: memberError } = await supabase
+      .from('family_members')
+      .insert({
+        family_id: family.id,
+        role: 'child',
+        display_name: name,
+        age: age || null,
+        avatar_url: avatar || null,
+        points: 0,
+        level: 1,
+      })
+      .select()
+      .single();
+    
+    if (memberError) throw memberError;
+    if (!memberData) throw new Error('Failed to create family member');
+    
+    const member = convertFamilyMemberRow(memberData);
     
     set(state => ({
       familyMembers: [...state.familyMembers, member]
@@ -227,59 +353,75 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   getFamilyByCode: async (code) => {
-    // TODO: Replace with actual Supabase call
-    // Mock implementation for now
-    if (code === 'ABC123') {
-      return {
-        id: 'family_123',
-        name: 'Smith Family',
-        code: 'ABC123',
-        createdAt: new Date().toISOString(),
-        ownerId: 'user_123',
-      };
+    const { data: familyData, error } = await supabase
+      .from('families')
+      .select('*')
+      .eq('family_code', code.toUpperCase())
+      .single();
+    
+    if (error || !familyData) {
+      return null;
     }
     
-    return null;
+    return convertFamilyRow(familyData);
   },
 
   getFamilyMembers: async (familyId) => {
-    // TODO: Replace with actual Supabase call
-    // Mock implementation for now
-    return [
-      {
-        id: 'member_1',
-        familyId,
-        name: 'John Smith',
-        age: 40,
-        role: 'parent' as const,
-        points: 0,
-      },
-      {
-        id: 'member_2',
-        familyId,
-        name: 'Emma Smith',
-        age: 10,
-        avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100',
-        role: 'child' as const,
-        points: 120,
-      },
-      {
-        id: 'member_3',
-        familyId,
-        name: 'Jake Smith',
-        age: 8,
-        avatar: 'https://images.unsplash.com/photo-1570655652364-2e0a67455ac6?q=80&w=100',
-        role: 'child' as const,
-        points: 85,
-      }
-    ];
+    const { data: membersData, error } = await supabase
+      .from('family_members')
+      .select('*')
+      .eq('family_id', familyId)
+      .order('created_at', { ascending: true });
+    
+    if (error) {
+      console.error('Error fetching family members:', error);
+      return [];
+    }
+    
+    return membersData?.map(convertFamilyMemberRow) || [];
   },
 
   restoreSession: async () => {
     try {
       set({ isLoading: true });
       
-      // Get from AsyncStorage
+      // Check for existing Supabase session first (for parents)
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session?.user) {
+        // Parent session - validate with database
+        const { data: memberData, error: memberError } = await supabase
+          .from('family_members')
+          .select(`
+            *,
+            families!inner(*)
+          `)
+          .eq('user_id', session.user.id)
+          .eq('role', 'parent')
+          .single();
+        
+        if (!memberError && memberData) {
+          const familyData = (memberData as any).families;
+          const family = convertFamilyRow(familyData);
+          const familyMembers = await get().getFamilyMembers(family.id);
+          
+          const user: User = {
+            id: session.user.id,
+            email: session.user.email,
+            role: 'parent',
+            familyId: family.id,
+          };
+          
+          // Update AsyncStorage
+          await AsyncStorage.setItem('user', JSON.stringify(user));
+          await AsyncStorage.setItem('family', JSON.stringify(family));
+          
+          set({ user, family, familyMembers, isLoading: false });
+          return;
+        }
+      }
+      
+      // Check AsyncStorage for child sessions or fallback
       const userJson = await AsyncStorage.getItem('user');
       const familyJson = await AsyncStorage.getItem('family');
       
@@ -287,12 +429,37 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         const user = JSON.parse(userJson) as User;
         const family = JSON.parse(familyJson) as Family;
         
-        // Get family members
+        // Validate family still exists
+        const validFamily = await get().getFamilyByCode(family.code);
+        if (!validFamily) {
+          // Family no longer exists, clear session
+          await AsyncStorage.removeItem('user');
+          await AsyncStorage.removeItem('family');
+          set({ isLoading: false });
+          return;
+        }
+        
+        // Get fresh family members
         const familyMembers = await get().getFamilyMembers(family.id);
+        
+        // For child users, validate they still exist in the family
+        if (user.role === 'child') {
+          const childExists = familyMembers.find(member => 
+            member.id === user.id && member.role === 'child'
+          );
+          
+          if (!childExists) {
+            // Child no longer exists, clear session
+            await AsyncStorage.removeItem('user');
+            await AsyncStorage.removeItem('family');
+            set({ isLoading: false });
+            return;
+          }
+        }
         
         set({ 
           user,
-          family,
+          family: validFamily,
           familyMembers,
           isLoading: false 
         });
@@ -300,6 +467,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         set({ isLoading: false });
       }
     } catch (error) {
+      console.error('Session restore error:', error);
       set({ 
         error: error instanceof Error ? error.message : 'Failed to restore session', 
         isLoading: false 
