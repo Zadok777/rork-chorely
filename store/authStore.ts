@@ -245,8 +245,14 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       console.log('Found family:', family);
       
       // Get all family members
-      const familyMembers = await get().getFamilyMembers(family.id);
-      console.log('Found family members:', familyMembers.length);
+      let familyMembers: FamilyMember[] = [];
+      try {
+        familyMembers = await get().getFamilyMembers(family.id);
+        console.log('Found family members:', familyMembers.length);
+      } catch (error) {
+        console.error('Failed to fetch family members during login:', error);
+        throw new Error(`Failed to load family data: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
       
       const user: User = {
         id: userId,
@@ -287,7 +293,13 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       }
       
       // Get family members
-      const familyMembers = await get().getFamilyMembers(family.id);
+      let familyMembers: FamilyMember[] = [];
+      try {
+        familyMembers = await get().getFamilyMembers(family.id);
+      } catch (error) {
+        console.error('Failed to fetch family members during child login:', error);
+        throw new Error(`Failed to load family data: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
       
       // Find the specific child
       const childMember = familyMembers.find(member => 
@@ -391,63 +403,119 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   addFamilyMember: async (name, age, avatar) => {
-    const { family } = get();
-    if (!family) throw new Error('No family found');
-    
-    // Insert family member
-    const { data: memberData, error: memberError } = await supabase
-      .from('family_members')
-      .insert({
-        family_id: family.id,
-        role: 'child',
-        display_name: name,
-        age: age || null,
-        avatar_url: avatar || null,
-        points: 0,
-        level: 1,
-      })
-      .select()
-      .single();
-    
-    if (memberError) throw memberError;
-    if (!memberData) throw new Error('Failed to create family member');
-    
-    const member = convertFamilyMemberRow(memberData);
-    
-    set(state => ({
-      familyMembers: [...state.familyMembers, member]
-    }));
-    
-    return member;
+    try {
+      const { family } = get();
+      if (!family) throw new Error('No family found');
+      
+      console.log('Adding family member:', { name, age, avatar, familyId: family.id });
+      
+      // Insert family member
+      const { data: memberData, error: memberError } = await supabase
+        .from('family_members')
+        .insert({
+          family_id: family.id,
+          role: 'child',
+          display_name: name,
+          age: age || null,
+          avatar_url: avatar || null,
+          points: 0,
+          level: 1,
+        })
+        .select()
+        .single();
+      
+      if (memberError) {
+        console.error('Family member creation error:', {
+          message: memberError.message,
+          details: memberError.details,
+          hint: memberError.hint,
+          code: memberError.code
+        });
+        throw new Error(`Failed to create family member: ${memberError.message}`);
+      }
+      
+      if (!memberData) {
+        throw new Error('Failed to create family member - no data returned');
+      }
+      
+      const member = convertFamilyMemberRow(memberData);
+      console.log('Family member created successfully:', member);
+      
+      set(state => ({
+        familyMembers: [...state.familyMembers, member]
+      }));
+      
+      return member;
+    } catch (error) {
+      console.error('addFamilyMember error:', error);
+      throw error;
+    }
   },
 
   getFamilyByCode: async (code) => {
-    const { data: familyData, error } = await supabase
-      .from('families')
-      .select('*')
-      .eq('family_code', code.toUpperCase())
-      .single();
-    
-    if (error || !familyData) {
+    try {
+      console.log('Looking up family by code:', code.toUpperCase());
+      
+      const { data: familyData, error } = await supabase
+        .from('families')
+        .select('*')
+        .eq('family_code', code.toUpperCase())
+        .single();
+      
+      if (error) {
+        console.log('Family lookup error:', {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        });
+        return null;
+      }
+      
+      if (!familyData) {
+        console.log('No family found with code:', code);
+        return null;
+      }
+      
+      console.log('Found family:', familyData);
+      return convertFamilyRow(familyData);
+    } catch (error) {
+      console.error('getFamilyByCode error:', error);
       return null;
     }
-    
-    return convertFamilyRow(familyData);
   },
 
   getFamilyMembers: async (familyId) => {
-    const { data: membersData, error } = await supabase
-      .from('family_members')
-      .select('*')
-      .eq('family_id', familyId)
-      .order('created_at', { ascending: true });
-    
-    if (error) {
-      console.error('Error fetching family members:', error);
-      return [];
+    try {
+      console.log('Fetching family members for family ID:', familyId);
+      
+      const { data: membersData, error } = await supabase
+        .from('family_members')
+        .select('*')
+        .eq('family_id', familyId)
+        .order('created_at', { ascending: true });
+      
+      if (error) {
+        console.error('Error fetching family members:', {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        });
+        throw new Error(`Failed to fetch family members: ${error.message}`);
+      }
+      
+      if (!membersData) {
+        console.log('No family members found for family:', familyId);
+        return [];
+      }
+      
+      console.log(`Found ${membersData.length} family members`);
+      return membersData.map(convertFamilyMemberRow);
+    } catch (error) {
+      console.error('getFamilyMembers error:', error);
+      throw error;
     }
-    
-    return membersData?.map(convertFamilyMemberRow) || [];
   },
 
   restoreSession: async () => {
@@ -480,7 +548,14 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
           
           if (!familyError && familyData) {
             const family = convertFamilyRow(familyData);
-            const familyMembers = await get().getFamilyMembers(family.id);
+            let familyMembers: FamilyMember[] = [];
+            try {
+              familyMembers = await get().getFamilyMembers(family.id);
+            } catch (error) {
+              console.error('Failed to fetch family members during session restore:', error);
+              // Don't fail completely, just log the error
+              familyMembers = [];
+            }
             
             const user: User = {
               id: session.user.id,
@@ -497,10 +572,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
             set({ user, family, familyMembers, isLoading: false });
             return;
           } else {
-            console.error('Failed to get family data:', familyError);
+            console.error('Failed to get family data:', familyError?.message || familyError || 'Unknown family error');
           }
         } else {
-          console.error('Failed to get family member data:', memberError);
+          console.error('Failed to get family member data:', memberError?.message || memberError || 'Unknown member error');
         }
       }
       
@@ -523,7 +598,17 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         }
         
         // Get fresh family members
-        const familyMembers = await get().getFamilyMembers(family.id);
+        let familyMembers: FamilyMember[] = [];
+        try {
+          familyMembers = await get().getFamilyMembers(family.id);
+        } catch (error) {
+          console.error('Failed to fetch family members during session restore:', error);
+          // Clear session if we can't load family data
+          await AsyncStorage.removeItem('user');
+          await AsyncStorage.removeItem('family');
+          set({ isLoading: false });
+          return;
+        }
         
         // For child users, validate they still exist in the family
         if (user.role === 'child') {
